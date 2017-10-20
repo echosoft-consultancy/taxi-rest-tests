@@ -1,0 +1,138 @@
+group 'echosoft'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    ext.kotlin_version = '1.1.4-3'
+
+    repositories {
+        mavenCentral()
+        jcenter()
+    }
+    dependencies {
+        classpath 'org.junit.platform:junit-platform-gradle-plugin:1.0.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        classpath 'com.bmuschko:gradle-docker-plugin:3.2.0'
+    }
+}
+
+apply plugin: 'kotlin'
+apply plugin: 'com.bmuschko.docker-remote-api'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile "org.jetbrains.kotlin:kotlin-stdlib-jre8:$kotlin_version"
+    testCompile 'io.rest-assured:rest-assured:3.0.5'
+    testCompile 'junit:junit:4.11'
+    compile "com.fasterxml.jackson.module:jackson-module-kotlin:2.9.0"
+}
+
+compileKotlin {
+    kotlinOptions.jvmTarget = "1.8"
+}
+compileTestKotlin {
+    kotlinOptions.jvmTarget = "1.8"
+}
+
+
+apply plugin: com.bmuschko.gradle.docker.DockerRemoteApiPlugin
+
+// import task classes
+import com.bmuschko.gradle.docker.tasks.image.DockerPullImage
+import com.bmuschko.gradle.docker.tasks.container.DockerCreateContainer
+import com.bmuschko.gradle.docker.tasks.container.DockerStartContainer
+import com.bmuschko.gradle.docker.tasks.container.DockerStopContainer
+import com.bmuschko.gradle.docker.tasks.container.DockerRemoveContainer
+
+
+task pullElasticImage(type: DockerPullImage) {
+    repository = 'docker.elastic.co/elasticsearch/elasticsearch'
+    tag = '5.6.3'
+}
+
+task createElasticContainer(type: DockerCreateContainer){
+    dependsOn pullElasticImage
+    targetImageId { pullElasticImage.getImageId() }
+    containerName = 'elasticsearch'
+    env = ['discovery.type=single-node']
+    portBindings = ['9200:9200']
+}
+
+task startElasticContainer(type: DockerStartContainer){
+    dependsOn createElasticContainer
+    targetContainerId {createElasticContainer.getContainerId()}
+}
+
+task pullTaxiImage(type: DockerPullImage) {
+    repository = 'echosoft/taxi'
+    tag = 'latest'
+}
+
+task createTaxiContainer(type: DockerCreateContainer){
+    dependsOn pullTaxiImage
+    targetImageId { pullTaxiImage.getImageId() }
+    env = ['ELASTICSEARCH_HOST=elasticsearch', 'ELASTICSEARCH_PORT=9200']
+    containerName = 'taxi'
+    links = ['elasticsearch:elasticsearch']
+    portBindings = ['4567:4567']
+}
+
+task startTaxiContainer(type: DockerStartContainer){
+    dependsOn createTaxiContainer
+    targetContainerId {createTaxiContainer.getContainerId()}
+}
+
+task startContainers {
+    dependsOn startElasticContainer
+    dependsOn startTaxiContainer
+}
+
+startContainers.doLast {
+    def url = 'http://localhost:4567/healthcheck'
+    println "Waiting for ${url} ..."
+    while (!taxiHealthCheck(url)) {
+        sleep(100)
+    }
+    println "${url} is up!"
+}
+
+static boolean taxiHealthCheck(url) {
+    def connection = new URL(url).openConnection()
+    connection.requestMethod = 'HEAD'
+    try {
+        connection.responseCode == 200
+    } catch (IOException ignored) {
+        false
+    }
+}
+
+test.dependsOn startContainers
+
+task stopElasticContainer(type: DockerStopContainer) {
+    targetContainerId { startElasticContainer.getContainerId() }
+}
+
+task stopTaxiContainer(type: DockerStopContainer) {
+    targetContainerId { startTaxiContainer.getContainerId() }
+}
+
+task rmElasticContainer(type: DockerRemoveContainer) {
+    dependsOn stopElasticContainer
+    targetContainerId { startElasticContainer.getContainerId() }
+
+}
+
+task rmTaxiContainer(type: DockerRemoveContainer) {
+    dependsOn stopTaxiContainer
+    targetContainerId { startTaxiContainer.getContainerId() }
+
+}
+
+task stopContainers {
+    dependsOn rmElasticContainer
+    dependsOn rmTaxiContainer
+}
+
+test.finalizedBy stopContainers
